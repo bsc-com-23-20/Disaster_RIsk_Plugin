@@ -30,133 +30,179 @@ __copyright__ = '(C) 2024 by Group 3'
 
 __revision__ = '$Format:%H$'
 
-from qgis.PyQt.QtCore import QCoreApplication
-from qgis.core import (QgsProcessing,
-                       QgsFeatureSink,
-                       QgsProcessingAlgorithm,
-                       QgsProcessingParameterFeatureSource,
-                       QgsProcessingParameterFeatureSink)
+# -*- coding: utf-8 -*-
+"""
+Flood Risk Assessment Algorithm
+"""
 
+from qgis.PyQt.QtCore import QCoreApplication # type: ignore
+from qgis.core import ( # type: ignore
+    QgsProcessingAlgorithm,
+    QgsProcessingParameterRasterLayer,
+    QgsProcessingParameterVectorLayer,
+    QgsProcessingParameterNumber,
+    QgsProcessingParameterFeatureSink,
+    QgsProcessing,
+    QgsFeatureSink,
+    QgsVectorLayer,  
+    QgsWkbTypes
+)
+import processing # type: ignore
+import os
 
 class FloodRiskAlgorithm(QgsProcessingAlgorithm):
-    """
-    This is an example algorithm that takes a vector layer and
-    creates a new identical one.
+    DEM = "DEM"
+    BUILDINGS = "BUILDINGS"
+    WATERWAYS = "WATERWAYS"
+    ELEVATION_THRESHOLD = "ELEVATION_THRESHOLD"
+    BUFFER_DISTANCE = "BUFFER_DISTANCE"
+    FLOOD_ZONES = "FLOOD_ZONES"
+    AFFECTED_BUILDINGS = "AFFECTED_BUILDINGS"
 
-    It is meant to be used as an example of how to create your own
-    algorithms and explain methods and variables used to do it. An
-    algorithm like this will be available in all elements, and there
-    is not need for additional work.
-
-    All Processing algorithms should extend the QgsProcessingAlgorithm
-    class.
-    """
-
-    # Constants used to refer to parameters and outputs. They will be
-    # used when calling the algorithm from another algorithm, or when
-    # calling from the QGIS console.
-
-    OUTPUT = 'OUTPUT'
-    INPUT = 'INPUT'
-
-    def initAlgorithm(self, config):
-        """
-        Here we define the inputs and output of the algorithm, along
-        with some other properties.
-        """
-
-        # We add the input vector features source. It can have any kind of
-        # geometry.
+    def initAlgorithm(self, config=None):
+    # Input DEM
         self.addParameter(
-            QgsProcessingParameterFeatureSource(
-                self.INPUT,
-                self.tr('Input layer'),
-                [QgsProcessing.TypeVectorAnyGeometry]
+        QgsProcessingParameterRasterLayer(self.DEM, "Digital Elevation Model (DEM)")
+        )
+    # Input buildings shapefile
+        self.addParameter(
+        QgsProcessingParameterVectorLayer(self.BUILDINGS, "Buildings Layer", [QgsProcessing.TypeVectorPolygon])
+        )
+    # Input waterways shapefile
+        self.addParameter(
+        QgsProcessingParameterVectorLayer(self.WATERWAYS, "Waterways Layer", [QgsProcessing.TypeVectorLine])
+        )
+    # Elevation threshold for flooding
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.ELEVATION_THRESHOLD, "Flood Elevation Threshold (meters)", 
+                type=QgsProcessingParameterNumber.Double, 
+                defaultValue=2
             )
         )
-
-        # We add a feature sink in which to store our processed features (this
-        # usually takes the form of a newly created vector layer when the
-        # algorithm is run in QGIS).
+    # Buffer distance for waterways
         self.addParameter(
-            QgsProcessingParameterFeatureSink(
-                self.OUTPUT,
-                self.tr('Output layer')
+            QgsProcessingParameterNumber(
+                self.BUFFER_DISTANCE, "Waterways Buffer Distance (meters)", 
+                type=QgsProcessingParameterNumber.Double, 
+                defaultValue=100
             )
         )
+    # Outputs
+        self.addParameter(
+            QgsProcessingParameterFeatureSink(self.FLOOD_ZONES, "Flood Zones")
+        )
+        self.addParameter(
+            QgsProcessingParameterFeatureSink(self.AFFECTED_BUILDINGS, "Affected Buildings")
+        )
+
 
     def processAlgorithm(self, parameters, context, feedback):
-        """
-        Here is where the processing itself takes place.
-        """
+        
+        temp_dir = "C:/temp/"
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+    # Step 1: Retrieve inputs
+        dem_layer = self.parameterAsRasterLayer(parameters, self.DEM, context)
+        buildings_layer = self.parameterAsVectorLayer(parameters, self.BUILDINGS, context)
+        waterways_layer = self.parameterAsVectorLayer(parameters, self.WATERWAYS, context)
+        elevation_threshold = self.parameterAsDouble(parameters, self.ELEVATION_THRESHOLD, context)
+        buffer_distance = self.parameterAsDouble(parameters, self.BUFFER_DISTANCE, context)
 
-        # Retrieve the feature source and sink. The 'dest_id' variable is used
-        # to uniquely identify the feature sink, and must be included in the
-        # dictionary returned by the processAlgorithm function.
-        source = self.parameterAsSource(parameters, self.INPUT, context)
-        (sink, dest_id) = self.parameterAsSink(parameters, self.OUTPUT,
-                context, source.fields(), source.wkbType(), source.sourceCrs())
+        if not dem_layer or not buildings_layer or not waterways_layer:
+            raise QgsProcessingException("One or more input layers are missing or invalid!")
+        if not buildings_layer:
+            raise QgsProcessingException("Buildings layer is invalid or missing!")
+        if not waterways_layer:
+            raise QgsProcessingException("Waterways layer is invalid or missing!")
 
-        # Compute the number of steps to display within the progress bar and
-        # get features from source
-        total = 100.0 / source.featureCount() if source.featureCount() else 0
-        features = source.getFeatures()
+    # Step 2: Calculate flood zones from DEM
+        feedback.pushInfo("Calculating flood zones...")
+        flood_zones_raster = processing.run("gdal:rastercalculator", {
+            'INPUT_A': dem_layer,
+            'BAND_A': 1,
+            'FORMULA': f"A <= {elevation_threshold}",
+            'OUTPUT': 'C:/temp/flood_zones_raster.tif'  # Save output to disk
+        }, context=context, feedback=feedback)['OUTPUT']
 
-        for current, feature in enumerate(features):
-            # Stop the algorithm if cancel button has been clicked
-            if feedback.isCanceled():
-                break
+        flood_zones_vector = processing.run("gdal:polygonize", {
+            'INPUT': flood_zones_raster,
+            'OUTPUT': 'C:/temp/flood_zones_vector.shp'  # Save output to disk
+        }, context=context, feedback=feedback)['OUTPUT']
 
-            # Add a feature in the sink
-            sink.addFeature(feature, QgsFeatureSink.FastInsert)
+    # Step 3: Buffer waterways
+        feedback.pushInfo("Buffering waterways...")
+        buffered_waterways = processing.run("native:buffer", {
+            'INPUT': waterways_layer,
+            'DISTANCE': buffer_distance,
+            'OUTPUT': 'memory:'
+        }, context=context, feedback=feedback)['OUTPUT']
 
-            # Update the progress bar
-            feedback.setProgress(int(current * total))
+# Step 4: Merge and combine flood zones and buffered waterways
+        # Step 4: Merge and combine flood zones and buffered waterways
+        feedback.pushInfo("Merging flood zones and waterways...")
+        merged_layer = processing.run("native:mergevectorlayers", {
+            'LAYERS': [flood_zones_vector, buffered_waterways],
+            'OUTPUT': 'memory:'
+        }, context=context, feedback=feedback)['OUTPUT']
 
-        # Return the results of the algorithm. In this case our only result is
-        # the feature sink which contains the processed features, but some
-        # algorithms may return multiple feature sinks, calculated numeric
-        # statistics, etc. These should all be included in the returned
-        # dictionary, with keys matching the feature corresponding parameter
-        # or output names.
-        return {self.OUTPUT: dest_id}
+        feedback.pushInfo("Combining flood zones and waterways...")
+        combined_flood_zones = processing.run("native:union", {
+            'INPUT': merged_layer,
+            'OVERLAY': merged_layer,
+            'OUTPUT': 'memory:'
+        }, context=context, feedback=feedback)['OUTPUT']
+
+        # Validation: Ensure the combined_flood_zones layer exists and contains features
+        if combined_flood_zones is None:
+            feedback.reportError("Error: Combined flood zones layer could not be created.")
+            return {}
+
+        if not any(combined_flood_zones.getFeatures()):
+            feedback.reportError("Error: Combined flood zones layer is empty.")
+            return {}
+
+        feedback.pushInfo("Combined flood zones layer created successfully.")
+
+    # Step 5: Assess affected buildings
+        # Step 5: Assess affected buildings
+        feedback.pushInfo("Identifying affected buildings...")
+        affected_buildings = processing.run("qgis:extractbylocation", {
+            'INPUT': buildings_layer,
+            'PREDICATE': [0],  # Ensure this is a list of valid predicates
+            'INTERSECT': combined_flood_zones,
+            'OUTPUT': 'memory:'
+        }, context=context, feedback=feedback)['OUTPUT']
+
+    # Step 6: Output results
+        feedback.pushInfo("Returning results...")
+        flood_zones_sink, flood_zones_id = self.parameterAsSink(
+            parameters, self.FLOOD_ZONES, context,
+            QgsVectorLayer('C:/temp/combined_flood_zones.shp').fields(),
+            QgsWkbTypes.MultiPolygon,
+            QgsVectorLayer('C:/temp/combined_flood_zones.shp').crs()
+        )
+
+        affected_buildings_sink, affected_buildings_id = self.parameterAsSink(
+            parameters, self.AFFECTED_BUILDINGS, context,
+            QgsVectorLayer('C:/temp/affected_buildings.shp').fields(),
+            QgsWkbTypes.MultiPolygon,
+            QgsVectorLayer('C:/temp/affected_buildings.shp').crs()
+        )
+
+        return {self.FLOOD_ZONES: flood_zones_id, self.AFFECTED_BUILDINGS: affected_buildings_id}
 
     def name(self):
-        """
-        Returns the algorithm name, used for identifying the algorithm. This
-        string should be fixed for the algorithm, and must not be localised.
-        The name should be unique within each provider. Names should contain
-        lowercase alphanumeric characters only and no spaces or other
-        formatting characters.
-        """
-        return 'Flood Risk Assessor'
+        return "floodrisk"
 
     def displayName(self):
-        """
-        Returns the translated algorithm name, which should be used for any
-        user-visible display of the algorithm name.
-        """
-        return self.tr(self.name())
+        return "Flood Risk Assessment"
 
     def group(self):
-        """
-        Returns the name of the group this algorithm belongs to. This string
-        should be localised.
-        """
-        return self.tr(self.groupId())
+        return "Flood Risk Tools"
 
     def groupId(self):
-        """
-        Returns the unique ID of the group this algorithm belongs to. This
-        string should be fixed for the algorithm, and must not be localised.
-        The group id should be unique within each provider. Group id should
-        contain lowercase alphanumeric characters only and no spaces or other
-        formatting characters.
-        """
-        return ''
-
-    def tr(self, string):
-        return QCoreApplication.translate('Processing', string)
+        return "flood_risk_tools"
 
     def createInstance(self):
         return FloodRiskAlgorithm()
